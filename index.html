@@ -919,22 +919,35 @@ function loadTaches(culteId,isAdmin){
   Object.values(S.timers).forEach(id=>clearInterval(id));
   S.timers={};
 
-  const unsub=db.collection('tasks').where('culte_id','==',culteId).orderBy('createdAt').onSnapshot(snap=>{
-    const tasks=snap.docs.map(d=>({id:d.id,...d.data()}));
+  const unsub=db.collection('tasks').where('culte_id','==',culteId).onSnapshot(snap=>{
+    // Tri côté client pour éviter l'index composite Firestore
+    const tasks=snap.docs.map(d=>({id:d.id,...d.data()}))
+      .sort((a,b)=>{
+        const at=a.createdAt?.toMillis?.()||0;
+        const bt=b.createdAt?.toMillis?.()||0;
+        return at-bt;
+      });
     const tc=$('tab-content');
     if(!tc)return;
     Object.values(S.timers).forEach(id=>clearInterval(id));
     S.timers={};
     tc.innerHTML=`
-      ${isAdmin?`<button class="btn btn-p btn-sm btn-full" style="margin-bottom:12px" onclick="mTask('${culteId}')">+ Ajouter une tâche</button>`:''}
-      ${tasks.length===0?`<div class="empty"><div class="empty-ic">⏱️</div><p>Aucune tâche</p></div>`:tasks.map(t=>taskCardHTML(t,isAdmin)).join('')}
+      ${isAdmin?`<button class="btn btn-p btn-full" style="margin-bottom:12px;padding:14px" onclick="mTask('${culteId}')">➕ Ajouter une tâche</button>`:''}
+      ${tasks.length===0
+        ?`<div class="empty"><div class="empty-ic">⏱️</div><p>Aucune tâche pour ce culte</p>${isAdmin?`<p style="font-size:12px;color:var(--G)">Cliquez sur le bouton ci-dessus</p>`:''}</div>`
+        :tasks.map(t=>taskCardHTML(t,isAdmin)).join('')}
     `;
     tasks.forEach(t=>{
       if(t.statut==='en_cours'&&t.temps_debut){
         startLocalTimer(t.id,t.temps_debut,t.temps_pause||0,t.duree||10);
       }
     });
-  },err=>console.warn(err));
+  },err=>{
+    console.error('Erreur tâches:',err);
+    const tc=$('tab-content');
+    if(tc) tc.innerHTML=`<div class="err-box">❌ Erreur de chargement des tâches.<br><small>${err.message}</small><br><br><button class="btn btn-p btn-sm" onclick="loadTaches('${culteId}',${isAdmin})">🔄 Réessayer</button></div>`;
+    toast('Erreur tâches: '+err.message,'err');
+  });
   S.tabUnsub=unsub;
 }
 
