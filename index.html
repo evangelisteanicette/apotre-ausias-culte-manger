@@ -579,6 +579,31 @@ const S = {
   navHistory: [],
 };
 
+// ── Système de Permissions ────────────────────────────
+/*
+  RÔLES :
+  👑 admin_general     → tout contrôler, tous les cultes, tous les paramètres
+  ⛪ responsable_culte → gérer son culte assigné (tâches, chrono, présences) - PAS les paramètres globaux
+  🔧 admin_section     → ajouter des tâches UNIQUEMENT pour SA section - PAS le chrono
+  👤 membre            → lecture seule (voir le dashboard et les chronos)
+*/
+function perms(culte){
+  const role=S.uDoc?.role||'membre';
+  const uid=S.user?.uid;
+  const isGA  = role==='admin_general';
+  const isRC  = role==='responsable_culte' && culte?.responsable_uid===uid;
+  const isAS  = role==='admin_section';
+  return {
+    canChrono      : isGA||isRC,           // START/PAUSE/STOP/RESET
+    canAddTask     : isGA||isRC||isAS,     // ajouter des tâches
+    canDeleteTask  : isGA||isRC,           // supprimer des tâches
+    canEditCulte   : isGA||isRC,           // modifier infos culte
+    canGlobal      : isGA,                 // sections & membres
+    isGA, isRC, isAS,
+    userSection    : S.uDoc?.section||'',  // section de l'utilisateur courant
+  };
+}
+
 // ── Utilities ─────────────────────────────────────────
 const $  = id => document.getElementById(id);
 const el = (tag, cls, html) => { const e=document.createElement(tag); if(cls)e.className=cls; if(html)e.innerHTML=html; return e; };
@@ -746,9 +771,15 @@ auth.onAuthStateChanged(async user=>{
 function bootApp(){
   showSplash(false); showAuth(false); showApp(true);
   const role=S.uDoc?.role;
-  const isAdmin=['admin_general','admin_section'].includes(role);
-  document.querySelectorAll('.admin-btn').forEach(b=>b.style.display=isAdmin?'flex':'none');
-  const pills={admin_general:'👑 Admin Gén.',admin_section:'🔧 Admin Sec.',membre:'👤 Membre'};
+  const isGA=role==='admin_general';
+  // Sections & Membres : Admin Général uniquement
+  document.querySelectorAll('.admin-btn').forEach(b=>b.style.display=isGA?'flex':'none');
+  const pills={
+    admin_general   :'👑 Admin Gén.',
+    responsable_culte:'⛪ Resp. Culte',
+    admin_section   :'🔧 Admin Sec.',
+    membre          :'👤 Membre'
+  };
   $('role-pill').textContent=pills[role]||'👤';
   S.navHistory=[];
   nav('dashboard',false);
@@ -865,16 +896,16 @@ function renderCulteDetail(culteId){
   $('bnav').style.display='none';
   $('content').innerHTML='<div class="loading">⏳ Chargement...</div>';
   if(!culteId)return;
-  const isAdmin=['admin_general','admin_section'].includes(S.uDoc?.role);
   const unsub=db.collection('cultes').doc(culteId).onSnapshot(snap=>{
     if(!snap.exists){$('content').innerHTML='<div class="view"><div class="err-box">Culte introuvable</div></div>';return;}
     S.culte={id:snap.id,...snap.data()};
-    renderCulteDetailUI(culteId,S.culte,isAdmin);
+    renderCulteDetailUI(culteId,S.culte);
   });
   S.listeners.push(unsub);
 }
 
-function renderCulteDetailUI(culteId,c,isAdmin){
+function renderCulteDetailUI(culteId,c,_unused){
+  const p=perms(c);
   const t=S.tab;
   $('content').innerHTML=`<div class="view">
     <div class="cd-header">
@@ -886,7 +917,7 @@ function renderCulteDetailUI(culteId,c,isAdmin){
         <span>👤 ${c.responsable_general||'Non assigné'}</span>
       </div>
       <div class="cd-acts">
-        ${isAdmin?`<button class="btn btn-s btn-xs" style="background:rgba(255,255,255,.2);color:#fff;border:none" onclick="mEditCulte('${culteId}')">✏️ Modifier</button>`:''}
+        ${p.canEditCulte?`<button class="btn btn-s btn-xs" style="background:rgba(255,255,255,.2);color:#fff;border:none" onclick="mEditCulte('${culteId}')">✏️ Modifier</button>`:''}
         <button class="btn btn-s btn-xs" style="background:rgba(255,255,255,.2);color:#fff;border:none" onclick="nav('rapports')">📊 Rapport</button>
       </div>
     </div>
@@ -896,8 +927,8 @@ function renderCulteDetailUI(culteId,c,isAdmin){
     </div>
     <div id="tab-content"></div>
   </div>`;
-  if(t==='taches') loadTaches(culteId,isAdmin);
-  else loadPresence(culteId,isAdmin);
+  if(t==='taches') loadTaches(culteId,p);
+  else loadPresence(culteId,p);
 }
 
 function switchTab(t){
@@ -906,13 +937,13 @@ function switchTab(t){
   Object.values(S.timers).forEach(id=>clearInterval(id));
   S.timers={};
   document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('on',b.textContent.includes(t==='taches'?'Tâches':'Présences')));
-  const isAdmin=['admin_general','admin_section'].includes(S.uDoc?.role);
-  if(t==='taches') loadTaches(S.culteId,isAdmin);
-  else loadPresence(S.culteId,isAdmin);
+  const p=perms(S.culte);
+  if(t==='taches') loadTaches(S.culteId,p);
+  else loadPresence(S.culteId,p);
 }
 
 // ── TÂCHES ────────────────────────────────────────────
-function loadTaches(culteId,isAdmin){
+function loadTaches(culteId,p){
   const box=$('tab-content');
   if(!box)return;
   box.innerHTML='<div class="loading">⏳</div>';
@@ -920,22 +951,35 @@ function loadTaches(culteId,isAdmin){
   S.timers={};
 
   const unsub=db.collection('tasks').where('culte_id','==',culteId).onSnapshot(snap=>{
-    // Tri côté client pour éviter l'index composite Firestore
-    const tasks=snap.docs.map(d=>({id:d.id,...d.data()}))
-      .sort((a,b)=>{
-        const at=a.createdAt?.toMillis?.()||0;
-        const bt=b.createdAt?.toMillis?.()||0;
-        return at-bt;
-      });
+    // Tri côté client (évite l'index composite Firestore)
+    const allTasks=snap.docs.map(d=>({id:d.id,...d.data()}))
+      .sort((a,b)=>(a.createdAt?.toMillis?.()||0)-(b.createdAt?.toMillis?.()||0));
+
+    // Admin de section : ne voit QUE les tâches de sa section
+    const tasks = p.isAS
+      ? allTasks.filter(t=>!t.section || t.section===p.userSection)
+      : allTasks;
+
     const tc=$('tab-content');
     if(!tc)return;
     Object.values(S.timers).forEach(id=>clearInterval(id));
     S.timers={};
+
+    // Badge info section pour admin_section
+    const sectionBanner = p.isAS
+      ? `<div class="badge b-p" style="display:inline-flex;margin-bottom:12px;font-size:12px;padding:6px 12px">🏛️ Section : ${p.userSection||'Non assignée'} — Vous ne voyez que vos tâches</div>`
+      : '';
+
     tc.innerHTML=`
-      ${isAdmin?`<button class="btn btn-p btn-full" style="margin-bottom:12px;padding:14px" onclick="mTask('${culteId}')">➕ Ajouter une tâche</button>`:''}
+      ${sectionBanner}
+      ${p.canAddTask
+        ? `<button class="btn btn-p btn-full" style="margin-bottom:12px;padding:14px" onclick="mTask('${culteId}')">➕ Ajouter une tâche</button>`
+        : ''}
       ${tasks.length===0
-        ?`<div class="empty"><div class="empty-ic">⏱️</div><p>Aucune tâche pour ce culte</p>${isAdmin?`<p style="font-size:12px;color:var(--G)">Cliquez sur le bouton ci-dessus</p>`:''}</div>`
-        :tasks.map(t=>taskCardHTML(t,isAdmin)).join('')}
+        ?`<div class="empty"><div class="empty-ic">⏱️</div>
+           <p>${p.isAS?'Aucune tâche pour votre section':'Aucune tâche pour ce culte'}</p>
+           ${p.canAddTask?`<p style="font-size:12px;color:var(--G)">Cliquez sur le bouton ci-dessus</p>`:''}</div>`
+        :tasks.map(t=>taskCardHTML(t,p)).join('')}
     `;
     tasks.forEach(t=>{
       if(t.statut==='en_cours'&&t.temps_debut){
@@ -943,22 +987,30 @@ function loadTaches(culteId,isAdmin){
       }
     });
   },err=>{
-    console.error('Erreur tâches:',err);
     const tc=$('tab-content');
-    if(tc) tc.innerHTML=`<div class="err-box">❌ Erreur de chargement des tâches.<br><small>${err.message}</small><br><br><button class="btn btn-p btn-sm" onclick="loadTaches('${culteId}',${isAdmin})">🔄 Réessayer</button></div>`;
-    toast('Erreur tâches: '+err.message,'err');
+    if(tc) tc.innerHTML=`<div class="err-box">❌ Erreur : ${err.message}<br><br><button class="btn btn-p btn-sm" onclick="loadTaches('${culteId}',p)">🔄 Réessayer</button></div>`;
+    toast('Erreur tâches : '+err.message,'err');
   });
   S.tabUnsub=unsub;
 }
 
-function taskCardHTML(t,isAdmin){
+function taskCardHTML(t,p){
   const dur=(t.duree||10)*60;
   const elapsed=t.temps_pause||0;
   const color=timerColor(elapsed,dur);
   const pct=Math.min(100,(elapsed/dur)*100);
-  const stMap={en_attente:['⏳ En attente','ts-wait'],en_cours:['▶️ En cours','ts-run'],pause:['⏸️ Pause','ts-pause'],terminé:['✅ Terminé','ts-done']};
+  const stMap={
+    en_attente:['⏳ En attente','ts-wait'],
+    en_cours  :['▶️ En cours','ts-run'],
+    pause     :['⏸️ Pause','ts-pause'],
+    terminé   :['✅ Terminé','ts-done']
+  };
   const [stLabel,stCls]=stMap[t.statut]||['—','ts-wait'];
   const tcls=t.statut==='en_cours'?'tc-running':t.statut==='pause'?'tc-pause':t.statut==='terminé'?'tc-done':'';
+
+  // L'admin de section peut supprimer uniquement SES tâches
+  const canDelThis = p.canDeleteTask || (p.isAS && t.section===p.userSection);
+
   return `<div class="task-card ${tcls}" id="tc-${t.id}">
     <div class="tc-head">
       <div>
@@ -969,20 +1021,30 @@ function taskCardHTML(t,isAdmin){
           <span>🕐 ${t.duree||'—'} min prévues</span>
         </div>
       </div>
-      <span class="tc-status ${stCls}">${stLabel}</span>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px">
+        <span class="tc-status ${stCls}">${stLabel}</span>
+        ${canDelThis?`<button class="btn-icon btn-del" style="width:28px;height:28px;font-size:13px" onclick="delTask('${t.id}')">🗑</button>`:''}
+      </div>
     </div>
+
     <div class="timer-wrap">
       <div class="timer-time" id="tt-${t.id}" style="color:${color}">${fTime(elapsed)}</div>
       <div class="timer-bar-track"><div class="timer-bar-fill" id="tb-${t.id}" style="width:${pct}%;background:${color}"></div></div>
-      <div class="timer-sub">${t.duree||'—'} min prévues · ${t.statut==='terminé'?'Terminé':'En cours'}</div>
+      <div class="timer-sub">${t.duree||'—'} min prévues · Temps écoulé affiché ci-dessus</div>
     </div>
-    ${isAdmin?`<div class="tc-ctrl">
-      <button class="tc-btn tcb-start" onclick="tStart('${t.id}',${t.duree||10})" ${t.statut==='en_cours'?'disabled':''}>▶ START</button>
-      <button class="tc-btn tcb-pause" onclick="tPause('${t.id}')" ${t.statut!=='en_cours'?'disabled':''}>⏸ PAUSE</button>
-      <button class="tc-btn tcb-stop" onclick="tStop('${t.id}')">⏹ STOP</button>
-      <button class="tc-btn tcb-reset" onclick="tReset('${t.id}')">↺ RESET</button>
-      <button class="tc-btn tcb-del" onclick="delTask('${t.id}')">🗑</button>
-    </div>`:''}
+
+    ${p.canChrono
+      ? `<div class="tc-ctrl">
+          <button class="tc-btn tcb-start" onclick="tStart('${t.id}',${t.duree||10})" ${t.statut==='en_cours'?'disabled':''}>▶ START</button>
+          <button class="tc-btn tcb-pause" onclick="tPause('${t.id}')" ${t.statut!=='en_cours'?'disabled':''}>⏸ PAUSE</button>
+          <button class="tc-btn tcb-stop"  onclick="tStop('${t.id}')">⏹ STOP</button>
+          <button class="tc-btn tcb-reset" onclick="tReset('${t.id}')">↺ RESET</button>
+        </div>`
+      : `<div style="font-size:11px;color:var(--G);text-align:center;padding:6px 0">
+           👁️ Lecture seule — seul l'Admin Général ou le Responsable de Culte peut contrôler le chrono
+         </div>`
+    }
+
     ${t.statut==='terminé'?`<div class="tc-foot">✅ Durée réelle : ${fTime(t.temps_pause||0)}</div>`:''}
   </div>`;
 }
@@ -1068,33 +1130,34 @@ async function delTask(tid){
 }
 
 // ── PRÉSENCES ─────────────────────────────────────────
-function loadPresence(culteId,isAdmin){
+function loadPresence(culteId,p){
   const box=$('tab-content');
   if(!box)return;
   box.innerHTML='<div class="loading">⏳</div>';
+  const canMark=p.canChrono||p.isAS; // GA, RC et Admin Section peuvent marquer
 
   db.collection('users').get().then(mSnap=>{
     const membres=mSnap.docs.map(d=>({id:d.id,...d.data()}));
-    const filtré=S.uDoc?.role==='admin_section'
-      ? membres.filter(m=>m.section===S.uDoc.section)
-      : membres;
+    const filtré=p.isAS ? membres.filter(m=>m.section===p.userSection) : membres;
 
     const unsub=db.collection('presence').where('culte_id','==',culteId).onSnapshot(pSnap=>{
       const tc=$('tab-content');
       if(!tc)return;
       const pmap={};
       pSnap.docs.forEach(d=>{const x=d.data();pmap[x.membre_id]={id:d.id,...x};});
-      const presents=Object.values(pmap).filter(p=>p.statut==='présent').length;
-      const absents=Object.values(pmap).filter(p=>p.statut==='absent').length;
-      const retards=Object.values(pmap).filter(p=>p.statut==='retard').length;
+      const presents=Object.values(pmap).filter(x=>x.statut==='présent').length;
+      const absents =Object.values(pmap).filter(x=>x.statut==='absent').length;
+      const retards =Object.values(pmap).filter(x=>x.statut==='retard').length;
+      const banner=p.isAS?`<div class="badge b-p" style="display:inline-flex;margin-bottom:12px;font-size:12px;padding:6px 12px">🏛️ Section : ${p.userSection||'—'} — Vous ne voyez que votre section</div>`:'';
       tc.innerHTML=`
+        ${banner}
         <div class="pres-stats">
           <span class="badge b-g">✅ ${presents} Présents</span>
           <span class="badge b-y">⚠️ ${retards} Retards</span>
           <span class="badge b-r">❌ ${absents} Absents</span>
         </div>
-        ${filtré.map(m=>{
-          const p=pmap[m.id];
+        ${filtré.length===0?`<div class="empty"><div class="empty-ic">👥</div><p>Aucun membre dans ${p.isAS?'votre section':'ce culte'}</p></div>`:filtré.map(m=>{
+          const pr=pmap[m.id];
           return `<div class="pres-item">
             <div class="pres-left">
               <div class="ava">${(m.nom||'?').charAt(0).toUpperCase()}</div>
@@ -1103,13 +1166,12 @@ function loadPresence(culteId,isAdmin){
                 <div class="pres-role">${m.section||m.role||'—'}</div>
               </div>
             </div>
-            ${isAdmin?`<div class="pres-btns">
-              <button class="pb ${p?.statut==='présent'?'pb-gon':''}" onclick="setPresence('${culteId}','${m.id}','${m.nom||''}','présent','${p?.id||''}')">✅</button>
-              <button class="pb ${p?.statut==='retard'?'pb-yon':''}" onclick="setPresence('${culteId}','${m.id}','${m.nom||''}','retard','${p?.id||''}')">⚠️</button>
-              <button class="pb ${p?.statut==='absent'?'pb-ron':''}" onclick="setPresence('${culteId}','${m.id}','${m.nom||''}','absent','${p?.id||''}')">❌</button>
-            </div>`:
-            `<span class="pres-label" style="color:${p?.statut==='présent'?'var(--GRN)':p?.statut==='absent'?'var(--RED)':'var(--YLW)'}">
-              ${p?{présent:'✅ Présent',absent:'❌ Absent',retard:'⚠️ Retard'}[p.statut]||'—':'—'}
+            ${canMark?`<div class="pres-btns">
+              <button class="pb ${pr?.statut==='présent'?'pb-gon':''}" onclick="setPresence('${culteId}','${m.id}','${m.nom||''}','présent','${pr?.id||''}')">✅</button>
+              <button class="pb ${pr?.statut==='retard'?'pb-yon':''}"  onclick="setPresence('${culteId}','${m.id}','${m.nom||''}','retard','${pr?.id||''}')">⚠️</button>
+              <button class="pb ${pr?.statut==='absent'?'pb-ron':''}"  onclick="setPresence('${culteId}','${m.id}','${m.nom||''}','absent','${pr?.id||''}')">❌</button>
+            </div>`:`<span class="pres-label" style="color:${pr?.statut==='présent'?'var(--GRN)':pr?.statut==='absent'?'var(--RED)':'var(--YLW)'}">
+              ${pr?{présent:'✅ Présent',absent:'❌ Absent',retard:'⚠️ Retard'}[pr.statut]||'—':'—'}
             </span>`}
           </div>`;
         }).join('')}
@@ -1529,17 +1591,24 @@ async function delCulte(id){
 
 // ── TASK ──────────────────────────────────────────────
 async function mTask(culteId){
+  const p=perms(S.culte);
   const sSnap=await db.collection('sections').get();
   const secs=sSnap.docs.map(d=>d.data().nom);
-  openModal(`<div class="modal-hd"><h3>+ Nouvelle Tâche</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+
+  // Admin de section : section pré-sélectionnée et verrouillée
+  const secOptions = p.isAS
+    ? `<option value="${p.userSection}" selected>${p.userSection}</option>`
+    : `<option value="">-- Choisir --</option>${secs.map(s=>`<option value="${s}">${s}</option>`).join('')}`;
+
+  openModal(`<div class="modal-hd"><h3>➕ Nouvelle Tâche</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
   <div class="modal-body">
     <div class="fg"><label>Nom de la tâche *</label><input type="text" id="mt-nom" placeholder="Ex: Chant d'ouverture, Prédication..."/></div>
     <div class="fg"><label>Responsable</label><input type="text" id="mt-resp" placeholder="Nom du responsable de la tâche"/></div>
-    <div class="fg"><label>Section</label>
-      <select id="mt-sec">
-        <option value="">-- Choisir une section --</option>
-        ${secs.map(s=>`<option value="${s}">${s}</option>`).join('')}
+    <div class="fg"><label>Section ${p.isAS?'(votre section)':''}</label>
+      <select id="mt-sec" ${p.isAS?'disabled':''}>
+        ${secOptions}
       </select>
+      ${p.isAS?`<input type="hidden" id="mt-sec-hidden" value="${p.userSection}"/>`:''}
     </div>
     <div class="fg"><label>Durée prévue (minutes) *</label><input type="number" id="mt-duree" placeholder="Ex: 15" min="1" max="999"/></div>
   </div>
@@ -1553,7 +1622,8 @@ async function saveTask(culteId){
   const nom=$('mt-nom')?.value.trim();
   const duree=parseInt($('mt-duree')?.value)||0;
   const resp=$('mt-resp')?.value.trim();
-  const sec=$('mt-sec')?.value;
+  // Pour admin_section le select est disabled → lire le champ hidden
+  const sec=$('mt-sec-hidden')?.value || $('mt-sec')?.value;
   if(!nom||!duree){toast('Nom et durée sont requis','err');return;}
   try{
     await db.collection('tasks').add({
@@ -1625,12 +1695,20 @@ function mEditMembre(id,nom,role,section){
     <div class="fg"><label>Nom complet</label><input type="text" id="em-nom" value="${nom}"/></div>
     <div class="fg"><label>Rôle</label>
       <select id="em-role">
-        <option value="membre" ${role==='membre'?'selected':''}>👤 Membre</option>
-        <option value="admin_section" ${role==='admin_section'?'selected':''}>🔧 Administrateur de Section</option>
-        <option value="admin_general" ${role==='admin_general'?'selected':''}>👑 Administrateur Général</option>
+        <option value="membre"            ${role==='membre'?'selected':''}>👤 Membre — lecture seule</option>
+        <option value="admin_section"     ${role==='admin_section'?'selected':''}>🔧 Admin de Section — gère SA section</option>
+        <option value="responsable_culte" ${role==='responsable_culte'?'selected':''}>⛪ Responsable de Culte — gère son culte + chrono</option>
+        <option value="admin_general"     ${role==='admin_general'?'selected':''}>👑 Administrateur Général — accès total</option>
       </select>
     </div>
-    <div class="fg"><label>Section</label><input type="text" id="em-sec" value="${section}" placeholder="Nom de la section"/></div>
+    <div class="fg"><label>Section assignée</label><input type="text" id="em-sec" value="${section}" placeholder="Nom de la section"/></div>
+    <div style="background:#FFF6E0;border-radius:10px;padding:12px;font-size:12px;color:#7A5F00;margin-top:4px;line-height:1.7">
+      ℹ️ <b>Niveaux d'accès :</b><br>
+      👑 Admin Général → tout contrôler, toutes les sections<br>
+      ⛪ Resp. Culte → gérer son culte assigné + contrôler les chronos<br>
+      🔧 Admin Section → ajouter des tâches pour SA section seulement<br>
+      👤 Membre → voir le tableau de bord et les chronos (lecture seule)
+    </div>
   </div>
   <div class="modal-foot">
     <button class="btn btn-s" onclick="closeModal()">Annuler</button>
