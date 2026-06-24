@@ -571,9 +571,10 @@ const S = {
   view: 'dashboard',
   culteId: null, culte: null,
   tab: 'taches',
-  listeners: [],      // all Firestore unsubs
-  tabUnsub: null,     // current tab unsub
-  timers: {},         // { taskId: intervalId }
+  listeners: [],
+  tabUnsub: null,
+  userProfileUnsub: null,   // ← écoute du profil en temps réel
+  timers: {},
   deferredPrompt: null,
   rapData: null,
   navHistory: [],
@@ -740,7 +741,24 @@ async function doForgot(){
 async function doLogout(){
   if(!confirm('Se déconnecter ?'))return;
   clearAll();
+  if(S.userProfileUnsub){ S.userProfileUnsub(); S.userProfileUnsub=null; }
   await auth.signOut();
+}
+
+// ── Rafraîchir le profil manuellement ────────────────
+async function refreshMyProfile(){
+  try{
+    const snap = await db.collection('users').doc(S.user.uid).get();
+    if(!snap.exists){ toast('Profil introuvable','err'); return; }
+    S.uDoc = snap.data();
+    const pills={admin_general:'👑 Admin Gén.',responsable_culte:'⛪ Resp. Culte',admin_section:'🔧 Admin Sec.',membre:'👤 Membre'};
+    $('role-pill').textContent = pills[S.uDoc.role]||'👤';
+    const isGA = S.uDoc.role==='admin_general';
+    document.querySelectorAll('.admin-btn').forEach(b=>b.style.display=isGA?'flex':'none');
+    clearAll();
+    nav('dashboard',false);
+    toast('Profil actualisé : '+( pills[S.uDoc.role]||'Membre'),'ok');
+  }catch(e){ toast('Erreur : '+e.message,'err'); }
 }
 
 // ── Auth Observer ─────────────────────────────────────
@@ -771,7 +789,6 @@ function bootApp(){
   showSplash(false); showAuth(false); showApp(true);
   const role=S.uDoc?.role;
   const isGA=role==='admin_general';
-  // Sections & Membres : Admin Général uniquement
   document.querySelectorAll('.admin-btn').forEach(b=>b.style.display=isGA?'flex':'none');
   const pills={
     admin_general   :'👑 Admin Gén.',
@@ -781,6 +798,28 @@ function bootApp(){
   };
   $('role-pill').textContent=pills[role]||'👤';
   S.navHistory=[];
+
+  // ── Écoute en temps réel du profil de l'utilisateur connecté ──
+  // Si l'Admin Général change le rôle de quelqu'un, l'app se met
+  // à jour IMMÉDIATEMENT sans besoin de déconnexion.
+  if(S.userProfileUnsub) S.userProfileUnsub();
+  S.userProfileUnsub = db.collection('users').doc(S.user.uid).onSnapshot(snap=>{
+    if(!snap.exists) return;
+    const newDoc = snap.data();
+    const oldRole = S.uDoc?.role;
+    S.uDoc = newDoc;
+
+    // Si le rôle a changé → recharger l'interface complètement
+    if(oldRole && newDoc.role !== oldRole){
+      const newPill = pills[newDoc.role]||'👤';
+      $('role-pill').textContent = newPill;
+      const newIsGA = newDoc.role==='admin_general';
+      document.querySelectorAll('.admin-btn').forEach(b=>b.style.display=newIsGA?'flex':'none');
+      toast(`Votre rôle a changé : ${newPill} — Rechargement...`,'inf');
+      setTimeout(()=>{ clearAll(); nav('dashboard',false); }, 1500);
+    }
+  });
+
   nav('dashboard',false);
 }
 
@@ -813,6 +852,12 @@ async function renderDashboard(){
       <div class="dash-greeting">
         <h2>Bonjour, ${nom} 👋</h2>
         <p>Bienvenue dans votre espace de gestion</p>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="badge ${role==='admin_general'?'b-g':role==='responsable_culte'?'b-b':role==='admin_section'?'b-p':'b-y'}">
+            ${{admin_general:'👑 Administrateur Général',responsable_culte:'⛪ Responsable de Culte',admin_section:'🔧 Admin de Section',membre:'👤 Membre'}[role]||'👤 Membre'}
+          </span>
+          <button class="btn-link" style="font-size:11px" onclick="refreshMyProfile()">🔄 Actualiser mon profil</button>
+        </div>
       </div>
       <div class="stats-grid">
         <div class="stat-card" onclick="nav('cultes')"><div class="stat-ic">⛪</div><div class="stat-v">${cSnap.size}</div><div class="stat-l">Cultes</div></div>
