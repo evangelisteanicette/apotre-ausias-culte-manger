@@ -582,23 +582,22 @@ const S = {
 // ── Système de Permissions ────────────────────────────
 /*
   RÔLES :
-  👑 admin_general     → tout contrôler, tous les cultes, tous les paramètres
-  ⛪ responsable_culte → gérer son culte assigné (tâches, chrono, présences) - PAS les paramètres globaux
-  🔧 admin_section     → ajouter des tâches UNIQUEMENT pour SA section - PAS le chrono
-  👤 membre            → lecture seule (voir le dashboard et les chronos)
+  👑 admin_general      → tout contrôler, tous les cultes, tous les paramètres
+  ⛪ responsable_culte  → gérer TOUS les cultes (tâches, chrono, présences) - PAS les paramètres globaux
+  🔧 admin_section      → ajouter des tâches UNIQUEMENT pour SA section - PAS le chrono
+  👤 membre             → lecture seule (voir le dashboard et les chronos)
 */
 function perms(culte){
   const role=S.uDoc?.role||'membre';
-  const uid=S.user?.uid;
   const isGA  = role==='admin_general';
-  const isRC  = role==='responsable_culte' && culte?.responsable_uid===uid;
+  const isRC  = role==='responsable_culte';   // ← peut gérer tous les cultes
   const isAS  = role==='admin_section';
   return {
     canChrono      : isGA||isRC,           // START/PAUSE/STOP/RESET
     canAddTask     : isGA||isRC||isAS,     // ajouter des tâches
     canDeleteTask  : isGA||isRC,           // supprimer des tâches
     canEditCulte   : isGA||isRC,           // modifier infos culte
-    canGlobal      : isGA,                 // sections & membres
+    canGlobal      : isGA,                 // sections & membres uniquement
     isGA, isRC, isAS,
     userSection    : S.uDoc?.section||'',  // section de l'utilisateur courant
   };
